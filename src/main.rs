@@ -51,10 +51,13 @@ struct Layer {
     weights: Vec<Vec<f64>>,
     biases: Vec<f64>,
     activation: Activation,
+    dropout_rate: f64,
 }
 
 impl Layer {
-    fn new(num_inputs: usize, num_neurons: usize, activation: Activation) -> Self {
+    fn new(num_inputs: usize, num_neurons: usize, activation: Activation, dropout_rate: f64) -> Self {
+        assert!(dropout_rate >= 0.0 && dropout_rate < 1.0, "Dropout rate must be between 0 and 1");
+        
         let mut rng = rand::rng();
         let scale = weight_scale(num_inputs, activation);
         
@@ -75,12 +78,26 @@ impl Layer {
             weights,
             biases,
             activation,
+            dropout_rate,
         }
     }
 
-    fn forward(&self, inputs: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    fn forward(&self, inputs: &[f64], is_training: bool) -> (Vec<f64>, Vec<f64>, Vec<bool>) {
+        let mut rng = rand::rng();
         let mut activations = Vec::with_capacity(self.num_neurons);
         let mut raw_outputs = Vec::with_capacity(self.num_neurons);
+        let mut dropout_mask = vec![true; self.num_neurons];
+        
+        // During training, randomly disable neurons
+        if is_training && self.dropout_rate > 0.0 {
+            for mask in dropout_mask.iter_mut() {
+                if rng.random_range(0.0..1.0) < self.dropout_rate {
+                    *mask = false;
+                }
+            }
+        }
+        
+        let scale = if is_training { 1.0 / (1.0 - self.dropout_rate) } else { 1.0 };
         
         for n in 0..self.num_neurons {
             let sum: f64 = (0..self.num_inputs)
@@ -88,11 +105,13 @@ impl Layer {
                 .sum();
             
             let raw = sum + self.biases[n];
+            let activated = self.activation.forward(raw);
+            
             raw_outputs.push(raw);
-            activations.push(self.activation.forward(raw));
+            activations.push(if dropout_mask[n] { activated * scale } else { 0.0 });
         }
         
-        (activations, raw_outputs)
+        (activations, raw_outputs, dropout_mask)
     }
 }
 
@@ -101,7 +120,7 @@ struct NeuralNetwork {
 }
 
 impl NeuralNetwork {
-    fn new(architecture: &[usize], hidden_activation: Activation, output_activation: Activation) -> Self {
+    fn new(architecture: &[usize], hidden_activation: Activation, output_activation: Activation, dropout_rate: f64) -> Self {
         let mut layers = Vec::new();
         
         // Create layers based on architecture
@@ -109,15 +128,17 @@ impl NeuralNetwork {
             layers.push(Layer::new(
                 architecture[i], 
                 architecture[i + 1], 
-                hidden_activation
+                hidden_activation,
+                dropout_rate  // Apply dropout to hidden layers
             ));
         }
         
-        // Output layer
+        // Output layer (no dropout in output layer)
         layers.push(Layer::new(
             architecture[architecture.len() - 2],
             architecture[architecture.len() - 1],
-            output_activation
+            output_activation,
+            0.0  // No dropout in output layer
         ));
         
         NeuralNetwork { layers }
@@ -126,9 +147,9 @@ impl NeuralNetwork {
     fn forward(&self, inputs: &[f64]) -> Vec<f64> {
         let mut current = inputs.to_vec();
         
-        // Forward propagate through each layer
+        // Forward propagate through each layer (no dropout during inference)
         for layer in &self.layers {
-            let (activations, _) = layer.forward(&current);
+            let (activations, _, _) = layer.forward(&current, false);
             current = activations;
         }
         
@@ -154,14 +175,16 @@ impl NeuralNetwork {
             for (input, target) in inputs.iter().zip(targets.iter()) {
                 let mut layer_outputs = vec![input.clone()];
                 let mut layer_raw_outputs = Vec::new();
+                let mut dropout_masks = Vec::new();
                 let mut current = input.clone();
                 
-                // Forward pass
+                // Forward pass with dropout
                 for layer in &self.layers {
-                    let (activations, raw) = layer.forward(&current);
+                    let (activations, raw, mask) = layer.forward(&current, true);
                     current = activations.clone();
                     layer_outputs.push(current.clone());
                     layer_raw_outputs.push(raw);
+                    dropout_masks.push(mask);
                 }
                 
                 // Calculate error
@@ -296,6 +319,7 @@ fn main() {
         &[81, 32, 16, 3],
         Activation::ReLU,    // hidden layers
         Activation::Sigmoid, // output layer
+        0.2,                // 20% dropout rate for hidden layers
     );
     
     let (training_inputs, training_targets) = create_pattern_data();
